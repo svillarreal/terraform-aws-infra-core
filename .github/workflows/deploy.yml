@@ -1,0 +1,11 @@
+name: "Deploy TimeService Infrastructure on AWS"
+
+on:
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  tfPlan:
+    name: "Run Terraform Plan"
+    runs-on: ubuntu-latest
+    environment: my-github-env

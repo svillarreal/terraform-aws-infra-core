@@ -13,6 +13,16 @@ output "vpc_cidr" {
   value       = aws_vpc.main.cidr_block
 }
 
+output "main_private_subnet_id" {
+  value       = values(aws_subnet.private)[0].id
+  description = "Main Private Subnet ID"
+}
+
+output "secondary_private_subnet_id" {
+  value       = values(aws_subnet.private)[1].id
+  description = "Secondary Private Subnet ID"
+}
+
 output "main_public_subnet_id" {
   value       = values(aws_subnet.public)[0].id
   description = "Main Public Subnet ID"

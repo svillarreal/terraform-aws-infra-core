@@ -1,3 +1,7 @@
+locals {
+  ecr_name = "${var.project}-ecr-repo-${var.env}"
+}
+
 module "timeservice_vpc" {
   source = "../../modules/network/vpc"
 }
@@ -9,11 +13,52 @@ module "timeservice_ecs_cluster" {
 }
 
 resource "aws_ecr_repository" "timeservice_ecr" {
-  name         = "${var.project}-${var.ecr_name}-${var.env}"
+  name         = local.ecr_name
   force_delete = true
   image_scanning_configuration {
     scan_on_push = true
   }
+}
+resource "aws_iam_role" "timeservice_task_ecr_role" {
+  name = "${var.project}-task-ecr-role-${var.env}"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role" "timeservice_task_execution_role" {
+  name = "${var.project}-task-execution-role-${var.env}"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "timeservice_iam_policy_attachement" {
+  role       = aws_iam_role.timeservice_task_ecr_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "timeservice_iam_execution_role_policy_attachement" {
+  role       = aws_iam_role.timeservice_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
 resource "aws_ecs_task_definition" "timeservice_task" {
@@ -21,37 +66,62 @@ resource "aws_ecs_task_definition" "timeservice_task" {
   requires_compatibilities = [
     "FARGATE",
   ]
+
   container_definitions = jsonencode([
     {
-      name   = "${var.project}-ecs-task-definition-${var.env}"
-      cpu    = 2
+      name  = local.ecr_name
+      image = "851717133722.dkr.ecr.us-east-1.amazonaws.com/timeservice-ecr-repo-dev:b70a2ac3e988aed5febddf26c04569117397ab34"
+      cpu   = 256
+      log_configuration = {
+        log_driver = "awslogs"
+        options = {
+          "awslogs-group"         = "/ecs/${var.project}-ecs-task-definition-${var.env}"
+          "awslogs-region"        = "us-east-1"
+          "awslogs-stream-prefix" = "ecs"
+        }
+      }
       memory = 512
-      image  = "latest"
       portMappings = [
         {
-          containerPort = 80
-          hostPort      = 80
+          containerPort = 3000
+          protocol      = "tcp"
         }
       ]
     }
   ])
-  cpu          = 2
-  memory       = 512
-  network_mode = "awsvpc"
+  cpu                = 256
+  memory             = 512
+  network_mode       = "awsvpc"
+  task_role_arn      = aws_iam_role.timeservice_task_ecr_role.arn
+  execution_role_arn = aws_iam_role.timeservice_task_execution_role.arn
 }
 
 resource "aws_security_group" "timeservice_sg" {
   name        = "${var.project}-sg-${var.env}"
   description = "AWS Security Group for TimeService ECS Fargate endpoint"
   vpc_id      = module.timeservice_vpc.vpc_id
-  ingress {
-    description = "allow HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = [module.timeservice_vpc.vpc_cidr]
-  }
+}
 
+resource "aws_vpc_security_group_ingress_rule" "eighteen_ingress_rule" {
+  from_port         = 80
+  to_port           = 80
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  security_group_id = aws_security_group.timeservice_sg.id
+}
+
+resource "aws_vpc_security_group_ingress_rule" "timeservice_ingress_rule" {
+  from_port         = 3000
+  to_port           = 3000
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  security_group_id = aws_security_group.timeservice_sg.id
+}
+
+resource "aws_vpc_security_group_egress_rule" "https_egress_rule" {
+  security_group_id = aws_security_group.timeservice_sg.id
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
 }
 
 resource "aws_lb" "timeservice_alb" {
@@ -69,11 +139,10 @@ resource "aws_lb" "timeservice_alb" {
 
 resource "aws_lb_target_group" "timeservice_alb_target_group" {
   name        = "${var.project}-ts-alb-tg-${var.env}"
-  port        = 80
+  port        = 3000
   protocol    = "HTTP"
   vpc_id      = module.timeservice_vpc.vpc_id
   target_type = "ip"
-
 }
 
 resource "aws_lb_listener" "timeservice_aws_lb_listener" {
@@ -84,7 +153,6 @@ resource "aws_lb_listener" "timeservice_aws_lb_listener" {
     type             = "forward"
     target_group_arn = aws_lb_target_group.timeservice_alb_target_group.arn
   }
-
 }
 
 resource "aws_ecs_service" "timeservice_service" {
@@ -96,16 +164,17 @@ resource "aws_ecs_service" "timeservice_service" {
 
   load_balancer {
     target_group_arn = aws_lb_target_group.timeservice_alb_target_group.arn
-    container_name   = "timeservice"
-    container_port   = 80
+    container_name   = local.ecr_name
+    container_port   = 3000
   }
 
   network_configuration {
 
-    subnets          = [module.timeservice_vpc.main_public_subnet_id, module.timeservice_vpc.secondary_public_subnet_id]
+    subnets          = [module.timeservice_vpc.main_private_subnet_id, module.timeservice_vpc.secondary_private_subnet_id]
     security_groups  = [aws_security_group.timeservice_sg.id]
-    assign_public_ip = true
+    assign_public_ip = false
   }
 
   desired_count = 1
+  depends_on    = [aws_lb_listener.timeservice_aws_lb_listener]
 }
